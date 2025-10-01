@@ -1,0 +1,83 @@
+## EXAMPLE GIT PIPELINE
+variables:
+  MAVEN_ARG: "--batch-mode verify sonar:sonar -f initial/pom.xml -Dsonar.projectName=conjur-cloud-jwt -Dsonar.qualitygate.wait=true -Dsonar.qualitygate.timeout=1800"
+  MAVEN_CLI_OPTS: "--batch-mode -f initial/pom.xml --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true"
+  CONJUR_URL: https://URLCONJURCLOUD.secretsmgr.cyberark.cloud
+  USERNAME_PATH: data/vault/devsecops/gitlab-admin-account/username
+  PASSWORD_PATH: data/vault/devsecops/gitlab-admin-account/password
+  SONARQUBE_PATH: data/vault/devsecops/gitlab-admin-account/address
+
+stages:
+  - read-secrets
+  - sonarqube-check
+  - build-test
+  - build
+  - test
+
+
+## AQUI VAI SER A CRIACAO DO TOKEN JWT
+sonarqube-check:
+  stage: test
+  id_tokens:
+      ID_TOKEN_1:
+        aud: https://gitlab.com
+  
+  image: 
+    name: maven:3.8.5-openjdk-17
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+    CONJUR_AUTHN_JWT_TOKEN: $ID_TOKEN_1  # AQUI EU SO MUDO DE NOME PARA FICAR MAIS FACIL VISUALIZACAO. 
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script: 
+    ### ESSA CHAMADA FAZ A AUTENTICACAO E TOMA UM TOKEN DE AUTORIZAÇÃO
+    - 'export AUTHN_TOKEN=$(curl -sk --header "Content-Type: application/x-www-form-urlencoded" --header "Accept-Encoding: base64" --request POST "${CONJUR_URL}/api/authn-jwt/gitlab1/conjur/authenticate" --data-urlencode "jwt=$CONJUR_AUTHN_JWT_TOKEN")'
+    
+    ### A AQUI PARA BAIXO FAZ UM CHAMADA PARA RECUPERAR CADA SECRET e COLOCA EM UMA VARIAVEL. 
+    - export USERNAME=$(curl -k --header "Authorization:Token token=\"${AUTHN_TOKEN}\"" -X GET "${CONJUR_URL}/api/secrets/conjur/variable/${USERNAME_PATH}")
+    - export PASSWORD=$(curl -k --header "Authorization:Token token=\"${AUTHN_TOKEN}\"" -X GET "${CONJUR_URL}/api/secrets/conjur/variable/${PASSWORD_PATH}")
+    - export SONARQUBE_URL=$(curl -k --header "Authorization:Token token=\"${AUTHN_TOKEN}\"" -X GET "${CONJUR_URL}/api/secrets/conjur/variable/${SONARQUBE_PATH}")
+    - mvn ${MAVEN_ARG}  -Dsonar.host.url=${SONARQUBE_URL} -Dsonar.login=${USERNAME} -Dsonar.password=${PASSWORD} 
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main'
+
+unit-test-job:   # This job runs in the test stage.
+  stage: test    # It only starts when the job in the build stage completes successfully.
+  script:
+    - echo "Running unit tests... This will take about 60 seconds."
+    - sleep 5
+    - echo "Code coverage is 90%"
+
+
+build-test:
+  stage: test
+  image: 
+    name: maven:3.8.5-openjdk-17
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+    GIT_DEPTH: "0"  # Tells git to fetch all the branches of the project, required by the analysis task
+  script:
+    - 'mvn $MAVEN_CLI_OPTS test-compile'
+
+
+build-container:       # This job runs in the build stage, which runs first.
+  stage: build
+  image: 
+    name: maven:3.8.5-openjdk-17
+    entrypoint: [""]
+  script:
+     - 'mvn $MAVEN_CLI_OPTS package'
+  artifacts:
+    untracked: false
+    when: on_success
+    expire_in: "30 days"
+    paths:
+      - "initial/target/*.jar"
+
+
